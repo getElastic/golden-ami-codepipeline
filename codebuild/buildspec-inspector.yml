@@ -10,7 +10,7 @@ phases:
     commands:
       - echo "=== Reading AMI ID from previous stage ==="
       - AMI_ID=$(cat ami-id.txt)
-      - echo "Scanning AMI: ${AMI_ID}"
+      - 'echo "Scanning AMI: ${AMI_ID}"'
       - |
         if [ -z "$AMI_ID" ]; then
           echo "ERROR: AMI ID file is empty"

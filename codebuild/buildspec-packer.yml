@@ -21,7 +21,7 @@ phases:
 
   pre_build:
     commands:
-      - echo "=== Pre-build: Init Packer plugins ==="
+      - 'echo "=== Pre-build: Init Packer plugins ==="'
       - cd "$CODEBUILD_SRC_DIR/packer"
       - packer init golden-ami.pkr.hcl
       - packer fmt -check golden-ami.pkr.hcl
@@ -39,7 +39,7 @@ phases:
 
   build:
     commands:
-      - echo "=== Build: Running Packer ==="
+      - 'echo "=== Build: Running Packer ==="'
       - cd "$CODEBUILD_SRC_DIR/packer"
       - |
         PACKER_LOG=1 packer build \
@@ -54,7 +54,7 @@ phases:
 
   post_build:
     commands:
-      - echo "=== Post-build: Extracting AMI ID ==="
+      - 'echo "=== Post-build: Extracting AMI ID ==="'
       - |
         AMI_ID=$(grep -oP 'ami-[a-f0-9]+' /tmp/packer-output.log | tail -1)
         if [ -z "$AMI_ID" ]; then

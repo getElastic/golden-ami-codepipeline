@@ -8,7 +8,7 @@ phases:
     commands:
       - echo "=== Reading AMI ID ==="
       - AMI_ID=$(cat ami-id.txt)
-      - echo "Promoting AMI: ${AMI_ID}"
+      - 'echo "Promoting AMI: ${AMI_ID}"'
 
   build:
     commands:
@@ -87,11 +87,11 @@ phases:
   post_build:
     commands:
       - echo "=== Golden AMI Promoted ==="
-      - echo "AMI ID   : ${AMI_ID}"
-      - echo "Region   : ${AWS_REGION}"
-      - echo "Status   : approved"
-      - AMI_NAME=$(aws ec2 describe-images --region ${AWS_REGION} --image-ids ${AMI_ID} --query "Images[0].Name" --output text)
-      - echo "AMI Name : ${AMI_NAME}"
+      - 'echo "AMI ID   : ${AMI_ID}"'
+      - 'echo "Region   : ${AWS_REGION}"'
+      - 'echo "Status   : approved"'
+      - 'AMI_NAME=$(aws ec2 describe-images --region ${AWS_REGION} --image-ids ${AMI_ID} --query "Images[0].Name" --output text)'
+      - 'echo "AMI Name : ${AMI_NAME}"'
 
 artifacts:
   files:
