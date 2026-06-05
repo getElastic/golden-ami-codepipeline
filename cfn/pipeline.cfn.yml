@@ -248,6 +248,9 @@ Resources:
               - Effect: Allow
                 Action: iam:PassRole
                 Resource: !GetAtt PackerInstanceRole.Arn
+              - Effect: Allow
+                Action: iam:GetInstanceProfile
+                Resource: !GetAtt PackerInstanceProfile.Arn
 
               # Inspector v2 - for scan gate job
               - Effect: Allow

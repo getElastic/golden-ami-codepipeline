@@ -42,6 +42,7 @@ phases:
       - 'echo "=== Build: Running Packer ==="'
       - cd "$CODEBUILD_SRC_DIR/packer"
       - |
+        set -o pipefail
         PACKER_LOG=1 packer build \
           -var "ami_version=${AMI_VERSION}" \
           -var "aws_region=${AWS_REGION}" \
@@ -56,7 +57,7 @@ phases:
     commands:
       - 'echo "=== Post-build: Extracting AMI ID ==="'
       - |
-        AMI_ID=$(grep -oP 'ami-[a-f0-9]+' /tmp/packer-output.log | tail -1)
+        AMI_ID=$(grep -oP 'ami-[0-9a-f]{8,17}' /tmp/packer-output.log | tail -1)
         if [ -z "$AMI_ID" ]; then
           echo "ERROR: Could not extract AMI ID from Packer output"
           cat /tmp/packer-output.log
