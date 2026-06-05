@@ -17,7 +17,7 @@
   },
   {
     "ParameterKey": "GitHubRepo",
-    "ParameterValue": "golden-ami-poc"
+    "ParameterValue": "golden-ami-codepipeline"
   },
   {
     "ParameterKey": "GitHubBranch",

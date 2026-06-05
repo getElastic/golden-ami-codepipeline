@@ -33,7 +33,7 @@ Parameters:
 
   GitHubRepo:
     Type: String
-    Default: golden-ami-poc
+    Default: golden-ami-codepipeline
     Description: GitHub repository name.
 
   GitHubBranch:
