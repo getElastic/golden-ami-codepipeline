@@ -91,5 +91,7 @@ phases:
 artifacts:
   files:
     - ami-id.txt
-  discard-paths: yes
+    - codebuild/buildspec-inspector.yml
+    - codebuild/buildspec-promote.yml
+  discard-paths: no
   name: BuildOutput
