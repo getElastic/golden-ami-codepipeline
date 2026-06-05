@@ -42,16 +42,17 @@ phases:
       - 'echo "=== Build: Running Packer ==="'
       - cd "$CODEBUILD_SRC_DIR/packer"
       - |
-        set -o pipefail
-        PACKER_LOG=1 packer build \
-          -var "ami_version=${AMI_VERSION}" \
-          -var "aws_region=${AWS_REGION}" \
-          -var "subnet_id=${SUBNET_ID}" \
-          -var "vpc_id=${VPC_ID}" \
-          -var "iam_instance_profile=${PACKER_INSTANCE_PROFILE}" \
-          -var "java_version=${JAVA_VERSION}" \
-          -var "node_version=${NODE_VERSION}" \
-          golden-ami.pkr.hcl 2>&1 | tee /tmp/packer-output.log
+        bash -o pipefail -c '
+          PACKER_LOG=1 packer build \
+            -var "ami_version=${AMI_VERSION}" \
+            -var "aws_region=${AWS_REGION}" \
+            -var "subnet_id=${SUBNET_ID}" \
+            -var "vpc_id=${VPC_ID}" \
+            -var "iam_instance_profile=${PACKER_INSTANCE_PROFILE}" \
+            -var "java_version=${JAVA_VERSION}" \
+            -var "node_version=${NODE_VERSION}" \
+            golden-ami.pkr.hcl 2>&1 | tee /tmp/packer-output.log
+        '
 
   post_build:
     commands:
