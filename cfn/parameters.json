@@ -1,0 +1,54 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "golden-ami"
+  },
+  {
+    "ParameterKey": "AmiVersion",
+    "ParameterValue": "1.0.0"
+  },
+  {
+    "ParameterKey": "GitHubConnectionArn",
+    "ParameterValue": "arn:aws:codeconnections:ap-southeast-2:648473667425:connection/b5b67020-481c-4e0c-acdb-14012f359715"
+  },
+  {
+    "ParameterKey": "GitHubOwner",
+    "ParameterValue": "getElastic"
+  },
+  {
+    "ParameterKey": "GitHubRepo",
+    "ParameterValue": "golden-ami-poc"
+  },
+  {
+    "ParameterKey": "GitHubBranch",
+    "ParameterValue": "master"
+  },
+  {
+    "ParameterKey": "BuildSubnetId",
+    "ParameterValue": "subnet-08f29363293041c1c"
+  },
+  {
+    "ParameterKey": "BuildVpcId",
+    "ParameterValue": "vpc-0cd9b55dcaaacac61"
+  },
+  {
+    "ParameterKey": "TargetAccountIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AwsRegion",
+    "ParameterValue": "ap-southeast-2"
+  },
+  {
+    "ParameterKey": "WeeklyRebuildSchedule",
+    "ParameterValue": "cron(0 2 ? * MON *)"
+  },
+  {
+    "ParameterKey": "JavaVersion",
+    "ParameterValue": "17"
+  },
+  {
+    "ParameterKey": "NodeVersion",
+    "ParameterValue": "20"
+  }
+]

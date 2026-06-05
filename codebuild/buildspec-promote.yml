@@ -1,0 +1,99 @@
+version: 0.2
+# buildspec-promote.yml
+# Stage 4: Promote the AMI.
+# Tags it as approved, shares cross-account, deprecates old versions.
+
+phases:
+  pre_build:
+    commands:
+      - echo "=== Reading AMI ID ==="
+      - AMI_ID=$(cat ami-id.txt)
+      - echo "Promoting AMI: ${AMI_ID}"
+
+  build:
+    commands:
+      # ── Tag as approved ────────────────────────────────────────────────────
+      - echo "=== Tagging AMI as approved ==="
+      - |
+        aws ec2 create-tags \
+          --region ${AWS_REGION} \
+          --resources ${AMI_ID} \
+          --tags \
+            Key=Status,Value=approved \
+            Key=ApprovedDate,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            Key=ApprovedBy,Value=codepipeline
+
+      # ── Cross-account sharing ──────────────────────────────────────────────
+      - |
+        if [ -n "${TARGET_ACCOUNT_IDS}" ]; then
+          echo "=== Sharing AMI with target accounts ==="
+          IFS=',' read -ra ACCOUNTS <<< "${TARGET_ACCOUNT_IDS}"
+          for ACCOUNT_ID in "${ACCOUNTS[@]}"; do
+            ACCOUNT_ID=$(echo "$ACCOUNT_ID" | tr -d ' ')
+            echo "Sharing with account ${ACCOUNT_ID}"
+
+            aws ec2 modify-image-attribute \
+              --region ${AWS_REGION} \
+              --image-id ${AMI_ID} \
+              --launch-permission "Add=[{UserId=${ACCOUNT_ID}}]"
+
+            SNAPSHOT_ID=$(aws ec2 describe-images \
+              --region ${AWS_REGION} \
+              --image-ids ${AMI_ID} \
+              --query "Images[0].BlockDeviceMappings[0].Ebs.SnapshotId" \
+              --output text)
+
+            aws ec2 modify-snapshot-attribute \
+              --region ${AWS_REGION} \
+              --snapshot-id ${SNAPSHOT_ID} \
+              --attribute createVolumePermission \
+              --operation-type add \
+              --user-ids ${ACCOUNT_ID}
+
+            echo "Shared with ${ACCOUNT_ID}"
+          done
+        else
+          echo "No target accounts configured. Skipping cross-account share."
+        fi
+
+      # ── Deprecate old AMI versions ─────────────────────────────────────────
+      - echo "=== Deprecating old AMI versions ==="
+      - |
+        PREVIOUS_AMIS=$(aws ec2 describe-images \
+          --region ${AWS_REGION} \
+          --owners self \
+          --filters \
+            "Name=tag:ProjectName,Values=${PROJECT_NAME}" \
+            "Name=tag:Status,Values=approved" \
+          --query "sort_by(Images, &CreationDate)[*].ImageId" \
+          --output text)
+
+        COUNT=0
+        for AMI in $(echo "$PREVIOUS_AMIS" | tr '\t' '\n' | tac); do
+          COUNT=$((COUNT + 1))
+          if [ "$AMI" = "${AMI_ID}" ]; then
+            continue
+          fi
+          if [ $COUNT -gt 3 ]; then
+            echo "Deprecating old AMI: ${AMI}"
+            aws ec2 enable-image-deprecation \
+              --region ${AWS_REGION} \
+              --image-id ${AMI} \
+              --deprecate-at "$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)" \
+              2>/dev/null || true
+          fi
+        done
+
+  post_build:
+    commands:
+      - echo "=== Golden AMI Promoted ==="
+      - echo "AMI ID   : ${AMI_ID}"
+      - echo "Region   : ${AWS_REGION}"
+      - echo "Status   : approved"
+      - AMI_NAME=$(aws ec2 describe-images --region ${AWS_REGION} --image-ids ${AMI_ID} --query "Images[0].Name" --output text)
+      - echo "AMI Name : ${AMI_NAME}"
+
+artifacts:
+  files:
+    - ami-id.txt
+  discard-paths: yes

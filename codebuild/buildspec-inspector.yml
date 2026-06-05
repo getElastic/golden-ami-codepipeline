@@ -1,0 +1,130 @@
+version: 0.2
+# buildspec-inspector.yml
+# Stage 3: Inspector v2 scan gate.
+# Reads the AMI ID from the previous stage artefact.
+# Launches a temp EC2 instance, polls Inspector v2, enforces thresholds.
+# Always terminates the temp instance, even on failure.
+
+phases:
+  pre_build:
+    commands:
+      - echo "=== Reading AMI ID from previous stage ==="
+      - AMI_ID=$(cat ami-id.txt)
+      - echo "Scanning AMI: ${AMI_ID}"
+      - |
+        if [ -z "$AMI_ID" ]; then
+          echo "ERROR: AMI ID file is empty"
+          exit 1
+        fi
+
+  build:
+    commands:
+      # ── Launch temp instance ───────────────────────────────────────────────
+      - echo "=== Launching temp instance for Inspector scan ==="
+      - |
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --region ${AWS_REGION} \
+          --image-id ${AMI_ID} \
+          --instance-type t3.micro \
+          --iam-instance-profile Name=${PACKER_INSTANCE_PROFILE} \
+          --subnet-id ${SUBNET_ID} \
+          --tag-specifications \
+            'ResourceType=instance,Tags=[{Key=Name,Value=inspector-scan-temp},{Key=Purpose,Value=inspector-gate},{Key=ManagedBy,Value=codepipeline}]' \
+          --query "Instances[0].InstanceId" \
+          --output text)
+        echo "Launched instance: ${INSTANCE_ID}"
+        echo ${INSTANCE_ID} > /tmp/instance-id.txt
+
+      # Wait for instance running
+      - aws ec2 wait instance-running --region ${AWS_REGION} --instance-ids ${INSTANCE_ID}
+      - echo "Instance running. Waiting 60s for SSM registration..."
+      - sleep 60
+
+      # ── Poll Inspector v2 findings ─────────────────────────────────────────
+      - echo "=== Polling Inspector v2 findings ==="
+      - |
+        MAX_WAIT=1200
+        ELAPSED=0
+        POLL_INTERVAL=30
+        FINDING_COUNT=0
+
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          FINDINGS=$(aws inspector2 list-findings \
+            --region ${AWS_REGION} \
+            --filter-criteria "{
+              \"ec2InstanceImageId\": [{\"comparison\": \"EQUALS\", \"value\": \"${AMI_ID}\"}]
+            }" \
+            --query "findings[*].{severity:severity,title:title}" \
+            --output json 2>/dev/null || echo "[]")
+
+          FINDING_COUNT=$(echo "$FINDINGS" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+          if [ "$FINDING_COUNT" -gt 0 ]; then
+            echo "Inspector findings found: ${FINDING_COUNT}"
+            break
+          fi
+
+          echo "No findings yet (${ELAPSED}s elapsed). Retrying in ${POLL_INTERVAL}s..."
+          sleep $POLL_INTERVAL
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        done
+
+        # Summarise findings
+        CRITICAL=$(echo "$FINDINGS" | python3 -c "
+        import json,sys
+        f = json.load(sys.stdin)
+        print(len([x for x in f if x.get('severity')=='CRITICAL']))
+        " 2>/dev/null || echo "0")
+
+        HIGH=$(echo "$FINDINGS" | python3 -c "
+        import json,sys
+        f = json.load(sys.stdin)
+        print(len([x for x in f if x.get('severity')=='HIGH']))
+        " 2>/dev/null || echo "0")
+
+        echo "Critical: ${CRITICAL}, High: ${HIGH}, Total: ${FINDING_COUNT}"
+        echo "CRITICAL=${CRITICAL}" > /tmp/inspector-results.txt
+        echo "HIGH=${HIGH}" >> /tmp/inspector-results.txt
+        echo "TOTAL=${FINDING_COUNT}" >> /tmp/inspector-results.txt
+
+      # ── Enforce thresholds ─────────────────────────────────────────────────
+      - |
+        source /tmp/inspector-results.txt
+        if [ "${CRITICAL:-0}" -gt 0 ]; then
+          echo "GATE FAILED: ${CRITICAL} CRITICAL findings detected. AMI will not be promoted."
+          aws ec2 create-tags --region ${AWS_REGION} \
+            --resources $(cat ami-id.txt) \
+            --tags Key=Status,Value=failed-inspector Key=InspectorCritical,Value=${CRITICAL}
+          # Terminate instance before failing
+          aws ec2 terminate-instances --region ${AWS_REGION} \
+            --instance-ids $(cat /tmp/instance-id.txt) || true
+          exit 1
+        fi
+        if [ "${HIGH:-0}" -gt 5 ]; then
+          echo "GATE FAILED: ${HIGH} HIGH findings exceeds threshold of 5."
+          aws ec2 create-tags --region ${AWS_REGION} \
+            --resources $(cat ami-id.txt) \
+            --tags Key=Status,Value=failed-inspector Key=InspectorHigh,Value=${HIGH}
+          aws ec2 terminate-instances --region ${AWS_REGION} \
+            --instance-ids $(cat /tmp/instance-id.txt) || true
+          exit 1
+        fi
+        echo "Inspector gate passed: Critical=${CRITICAL}, High=${HIGH}"
+
+  post_build:
+    commands:
+      # Always terminate the temp instance
+      - |
+        INSTANCE_ID=$(cat /tmp/instance-id.txt 2>/dev/null || echo "")
+        if [ -n "$INSTANCE_ID" ]; then
+          echo "Terminating temp instance ${INSTANCE_ID}"
+          aws ec2 terminate-instances --region ${AWS_REGION} \
+            --instance-ids ${INSTANCE_ID} || true
+        fi
+      - echo "Inspector gate complete. Passing AMI ID to promote stage."
+
+artifacts:
+  files:
+    - ami-id.txt
+  discard-paths: yes
+  name: InspectorOutput

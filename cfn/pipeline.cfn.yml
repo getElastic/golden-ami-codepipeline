@@ -1,0 +1,590 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Golden AMI Pipeline - GitHub -> CodePipeline -> CodeBuild (Packer) -> Inspector -> Tag approved.
+  Runs in a dedicated CICD account. AMI is shared to target workload accounts after promotion.
+
+# -----------------------------------------------------------------------------
+# PARAMETERS
+# -----------------------------------------------------------------------------
+Parameters:
+
+  # -- Project identity -------------------------------------------------------
+  ProjectName:
+    Type: String
+    Default: golden-ami
+    Description: Short name used to prefix all resources.
+
+  AmiVersion:
+    Type: String
+    Default: "1.0.0"
+    Description: Semantic version baked into the AMI name tag.
+
+  # -- GitHub source ----------------------------------------------------------
+  GitHubConnectionArn:
+    Type: String
+    Description: >
+      ARN of the CodeStar connection to GitHub. Create one manually in the
+      console under Developer Tools > Connections, then paste the ARN here.
+      Must be in AVAILABLE status before deploying.
+
+  GitHubOwner:
+    Type: String
+    Description: GitHub org or username (e.g. getElastic).
+
+  GitHubRepo:
+    Type: String
+    Default: golden-ami-poc
+    Description: GitHub repository name.
+
+  GitHubBranch:
+    Type: String
+    Default: master
+    Description: Branch that triggers the pipeline on push.
+
+  # -- Networking (for Packer build instance) ---------------------------------
+  BuildSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet where Packer launches the build EC2 instance.
+
+  BuildVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC containing the build subnet.
+
+  # -- AMI sharing ------------------------------------------------------------
+  TargetAccountIds:
+    Type: String
+    Default: ""
+    Description: >
+      Comma-separated AWS account IDs to share the approved AMI with.
+      Leave empty for no cross-account sharing.
+
+  # -- AWS region -------------------------------------------------------------
+  AwsRegion:
+    Type: String
+    Default: ap-southeast-2
+    Description: Region where the AMI is built.
+
+  # -- Schedule ---------------------------------------------------------------
+  WeeklyRebuildSchedule:
+    Type: String
+    Default: "cron(0 2 ? * MON *)"
+    Description: EventBridge cron for weekly rebuild. Default = Monday 02:00 UTC.
+
+  # -- Java / Node versions ---------------------------------------------------
+  JavaVersion:
+    Type: String
+    Default: "17"
+    AllowedValues: ["11", "17", "21"]
+
+  NodeVersion:
+    Type: String
+    Default: "20"
+    AllowedValues: ["18", "20", "22"]
+
+# -----------------------------------------------------------------------------
+# CONDITIONS
+# -----------------------------------------------------------------------------
+Conditions:
+  HasTargetAccounts: !Not [!Equals [!Ref TargetAccountIds, ""]]
+
+# -----------------------------------------------------------------------------
+# RESOURCES
+# -----------------------------------------------------------------------------
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 - Pipeline artefact bucket
+  # ---------------------------------------------------------------------------
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 90
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+  # ---------------------------------------------------------------------------
+  # IAM - Packer EC2 instance role + profile
+  # This is what gets attached to the build EC2 instance Packer launches.
+  # ---------------------------------------------------------------------------
+  PackerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-packer-instance-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonInspector2ManagedCisPolicy
+      Policies:
+        - PolicyName: PackerInstanceBasePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                Resource: "*"
+
+  PackerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectName}-packer-instance-profile"
+      Roles:
+        - !Ref PackerInstanceRole
+
+  # ---------------------------------------------------------------------------
+  # IAM - CodeBuild service role
+  # This is what CodeBuild assumes when running the Packer build job.
+  # ---------------------------------------------------------------------------
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codebuild-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPackerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              # Logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AwsRegion}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}*"
+
+              # S3 - read/write artefact bucket
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+
+              # EC2 - Packer needs these to launch/manage the build instance
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeRegions
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeKeyPairs
+                  - ec2:DescribeTags
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeImageAttribute
+                  - ec2:RunInstances
+                  - ec2:StopInstances
+                  - ec2:TerminateInstances
+                  - ec2:CreateImage
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:CreateKeyPair
+                  - ec2:DeleteKeyPair
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:ModifyImageAttribute
+                  - ec2:ModifySnapshotAttribute
+                  - ec2:EnableImageDeprecation
+                  - ec2:CopyImage
+                  - ec2:RegisterImage
+                  - ec2:DeregisterImage
+                Resource: "*"
+
+              # PassRole - only pass the Packer instance role
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt PackerInstanceRole.Arn
+
+              # Inspector v2 - for scan gate job
+              - Effect: Allow
+                Action:
+                  - inspector2:ListFindings
+                  - inspector2:GetFindingsReportStatus
+                  - inspector2:BatchGetFreeTrialInfo
+                Resource: "*"
+
+              # SSM - check instance reachability
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeInstanceInformation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # IAM - CodePipeline service role
+  # ---------------------------------------------------------------------------
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codepipeline-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource:
+                  - !GetAtt PackerBuildProject.Arn
+                  - !GetAtt InspectorGateProject.Arn
+                  - !GetAtt PromoteProject.Arn
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                  - codeconnections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+  # ---------------------------------------------------------------------------
+  # IAM - EventBridge role (for weekly scheduled trigger)
+  # ---------------------------------------------------------------------------
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-eventbridge-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartPipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub "arn:aws:codepipeline:${AwsRegion}:${AWS::AccountId}:${GoldenAmiPipeline}"
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Log Groups - one per CodeBuild project
+  # ---------------------------------------------------------------------------
+  PackerBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${ProjectName}-packer-build"
+      RetentionInDays: 90
+
+  InspectorGateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${ProjectName}-inspector-gate"
+      RetentionInDays: 90
+
+  PromoteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${ProjectName}-promote"
+      RetentionInDays: 90
+
+  # ---------------------------------------------------------------------------
+  # CODEBUILD - Job 1: Packer build
+  # Runs packer init + packer build. Outputs the AMI ID to SSM.
+  # ---------------------------------------------------------------------------
+  PackerBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-packer-build"
+      Description: Builds the Golden AMI using Packer.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 60
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: codebuild/buildspec-packer.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref AwsRegion
+          - Name: AMI_VERSION
+            Value: !Ref AmiVersion
+          - Name: SUBNET_ID
+            Value: !Ref BuildSubnetId
+          - Name: VPC_ID
+            Value: !Ref BuildVpcId
+          - Name: JAVA_VERSION
+            Value: !Ref JavaVersion
+          - Name: NODE_VERSION
+            Value: !Ref NodeVersion
+          - Name: PACKER_INSTANCE_PROFILE
+            Value: !Ref PackerInstanceProfile
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+      Artifacts:
+        Type: CODEPIPELINE
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref PackerBuildLogGroup
+
+  # ---------------------------------------------------------------------------
+  # CODEBUILD - Job 2: Inspector scan gate
+  # Launches a temp instance, polls Inspector v2, enforces thresholds.
+  # ---------------------------------------------------------------------------
+  InspectorGateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-inspector-gate"
+      Description: Launches temp instance, runs Inspector v2 scan, enforces finding thresholds.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 40
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: codebuild/buildspec-inspector.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref AwsRegion
+          - Name: SUBNET_ID
+            Value: !Ref BuildSubnetId
+          - Name: PACKER_INSTANCE_PROFILE
+            Value: !Ref PackerInstanceProfile
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+      Artifacts:
+        Type: CODEPIPELINE
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref InspectorGateLogGroup
+
+  # ---------------------------------------------------------------------------
+  # CODEBUILD - Job 3: Promote
+  # Tags AMI as approved, shares cross-account, deprecates old versions.
+  # ---------------------------------------------------------------------------
+  PromoteProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-promote"
+      Description: Tags AMI as approved and shares to target accounts.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 15
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: codebuild/buildspec-promote.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref AwsRegion
+          - Name: TARGET_ACCOUNT_IDS
+            Value: !Ref TargetAccountIds
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+      Artifacts:
+        Type: CODEPIPELINE
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref PromoteLogGroup
+
+  # ---------------------------------------------------------------------------
+  # CODEPIPELINE
+  # Stage 1: Source (GitHub via CodeStar)
+  # Stage 2: Build  (Packer)
+  # Stage 3: Scan   (Inspector gate)
+  # Stage 4: Promote
+  # ---------------------------------------------------------------------------
+  GoldenAmiPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${ProjectName}-pipeline"
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      RestartExecutionOnUpdate: false
+      Stages:
+
+        # -- Stage 1: Source -------------------------------------------------
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub "${GitHubOwner}/${GitHubRepo}"
+                BranchName: !Ref GitHubBranch
+                # Only trigger on changes to packer/ scripts/ or codebuild/
+                # Note: path filtering is done in the buildspec, not natively in CodePipeline
+                DetectChanges: true
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+
+        # -- Stage 2: Build AMI ----------------------------------------------
+        - Name: BuildAMI
+          Actions:
+            - Name: PackerBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref PackerBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+
+        # -- Stage 3: Inspector scan gate ------------------------------------
+        - Name: InspectorScanGate
+          Actions:
+            - Name: InspectorGate
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref InspectorGateProject
+              InputArtifacts:
+                - Name: BuildOutput
+              OutputArtifacts:
+                - Name: InspectorOutput
+              RunOrder: 1
+
+        # -- Stage 4: Promote ------------------------------------------------
+        - Name: Promote
+          Actions:
+            - Name: PromoteAMI
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref PromoteProject
+              InputArtifacts:
+                - Name: InspectorOutput
+              RunOrder: 1
+
+  # ---------------------------------------------------------------------------
+  # EVENTBRIDGE - Weekly scheduled rebuild
+  # Triggers the pipeline every Monday at 02:00 UTC regardless of code changes.
+  # ---------------------------------------------------------------------------
+  WeeklyRebuildRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-weekly-rebuild"
+      Description: Triggers the Golden AMI pipeline on a weekly schedule for OS patch pickup.
+      ScheduleExpression: !Ref WeeklyRebuildSchedule
+      State: ENABLED
+      Targets:
+        - Id: GoldenAmiPipeline
+          Arn: !Sub "arn:aws:codepipeline:${AwsRegion}:${AWS::AccountId}:${GoldenAmiPipeline}"
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+# -----------------------------------------------------------------------------
+# OUTPUTS
+# -----------------------------------------------------------------------------
+Outputs:
+  PipelineUrl:
+    Description: Direct link to the CodePipeline in the console.
+    Value: !Sub "https://${AwsRegion}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${GoldenAmiPipeline}/view"
+
+  ArtifactBucketName:
+    Description: S3 bucket used for pipeline artefacts and AMI ID handoff between stages.
+    Value: !Ref ArtifactBucket
+
+  PackerInstanceProfileArn:
+    Description: Instance profile ARN attached to the Packer build EC2 instance.
+    Value: !GetAtt PackerInstanceProfile.Arn
+
+  PackerInstanceProfileName:
+    Description: Instance profile name (used in Packer template).
+    Value: !Ref PackerInstanceProfile
