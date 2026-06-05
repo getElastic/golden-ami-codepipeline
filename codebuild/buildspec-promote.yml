@@ -27,9 +27,11 @@ phases:
       - |
         if [ -n "${TARGET_ACCOUNT_IDS}" ]; then
           echo "=== Sharing AMI with target accounts ==="
-          IFS=',' read -ra ACCOUNTS <<< "${TARGET_ACCOUNT_IDS}"
-          for ACCOUNT_ID in "${ACCOUNTS[@]}"; do
+          echo "${TARGET_ACCOUNT_IDS}" | tr ',' '\n' | while read -r ACCOUNT_ID; do
             ACCOUNT_ID=$(echo "$ACCOUNT_ID" | tr -d ' ')
+            if [ -z "$ACCOUNT_ID" ]; then
+              continue
+            fi
             echo "Sharing with account ${ACCOUNT_ID}"
 
             aws ec2 modify-image-attribute \
