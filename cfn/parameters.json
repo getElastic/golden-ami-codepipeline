@@ -9,11 +9,11 @@
   },
   {
     "ParameterKey": "GitHubConnectionArn",
-    "ParameterValue": "arn:aws:codeconnections:ap-southeast-2:648473667425:connection/b5b67020-481c-4e0c-acdb-14012f359715"
+    "ParameterValue": "arn:aws:codeconnections:ap-southeast-2:ACCOUNT_ID:connection/CONNECTION_ID"
   },
   {
     "ParameterKey": "GitHubOwner",
-    "ParameterValue": "getElastic"
+    "ParameterValue": "REPLACE_WITH_GITHUB_OWNER"
   },
   {
     "ParameterKey": "GitHubRepo",
@@ -25,11 +25,11 @@
   },
   {
     "ParameterKey": "BuildSubnetId",
-    "ParameterValue": "subnet-08f29363293041c1c"
+    "ParameterValue": "REPLACE_WITH_SUBNET_ID"
   },
   {
     "ParameterKey": "BuildVpcId",
-    "ParameterValue": "vpc-0cd9b55dcaaacac61"
+    "ParameterValue": "REPLACE_WITH_VPC_ID"
   },
   {
     "ParameterKey": "TargetAccountIds",

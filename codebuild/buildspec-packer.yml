@@ -15,6 +15,8 @@ phases:
     commands:
       - echo "=== Installing Packer ${PACKER_VERSION} ==="
       - curl -fsSL https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip -o packer.zip
+      - curl -fsSL https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_SHA256SUMS -o packer_SHA256SUMS
+      - sha256sum --ignore-missing -c packer_SHA256SUMS
       - unzip -o packer.zip -d /usr/local/bin/
       - chmod +x /usr/local/bin/packer
       - packer --version
@@ -58,9 +60,10 @@ phases:
     commands:
       - 'echo "=== Post-build: Extracting AMI ID ==="'
       - |
-        AMI_ID=$(grep -oP 'ami-[0-9a-f]{8,17}' /tmp/packer-output.log | tail -1)
-        if [ -z "$AMI_ID" ]; then
-          echo "ERROR: Could not extract AMI ID from Packer output"
+        AMI_ID=$(jq -r '.builds[-1].artifact_id' "$CODEBUILD_SRC_DIR/packer/manifest.json" | cut -d':' -f2)
+        if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "null" ]; then
+          echo "ERROR: Could not extract AMI ID from Packer manifest"
+          cat "$CODEBUILD_SRC_DIR/packer/manifest.json"
           cat /tmp/packer-output.log
           exit 1
         fi
@@ -81,10 +84,13 @@ phases:
             Key=ProjectName,Value=${PROJECT_NAME} \
             Key=AmiVersion,Value=${AMI_VERSION}
 
-      # Save Packer log to S3 for auditability
+      # Save Packer log and manifest to S3 for auditability
       - |
         aws s3 cp /tmp/packer-output.log \
           s3://${ARTIFACT_BUCKET}/logs/${CODEBUILD_BUILD_ID}/packer-output.log
+      - |
+        aws s3 cp "$CODEBUILD_SRC_DIR/packer/manifest.json" \
+          s3://${ARTIFACT_BUCKET}/logs/${CODEBUILD_BUILD_ID}/manifest.json
 
       - echo "AMI ID ${AMI_ID} written and tagged. Proceeding to Inspector gate."
 

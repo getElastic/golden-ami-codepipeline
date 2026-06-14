@@ -2,7 +2,7 @@ packer {
   required_version = ">= 1.11.0"
   required_plugins {
     amazon = {
-      version = ">= 1.3.0"
+      version = "= 1.8.0"
       source  = "github.com/hashicorp/amazon"
     }
   }
@@ -71,6 +71,12 @@ variable "vpc_id" {
   default = ""
 }
 
+variable "security_group_id" {
+  type    = string
+  default = ""
+  # Must be set for non-default VPC builds — SG should allow egress only
+}
+
 variable "iam_instance_profile" {
   type    = string
   default = "golden-ami-packer-instance-profile"
@@ -80,7 +86,8 @@ variable "iam_instance_profile" {
 variable "kms_key_id" {
   type    = string
   default = ""
-  # Leave empty for AWS-managed key; set ARN for CMK encryption
+  # REQUIRED — must be a CMK ARN. variables.pkrvars.hcl sets this; an empty
+  # value here only matters if that file is not used.
 }
 
 # ---------------------------------------------------------------------------
@@ -108,6 +115,7 @@ source "amazon-ebs" "golden" {
   source_ami    = data.amazon-ami.al2023.id
   instance_type = var.instance_type
   ssh_username  = "ec2-user"
+  imds_support  = "v2.0"
 
   # AMI naming — timestamp suffix ensures uniqueness across rebuilds
   ami_name        = "${var.ami_name_prefix}-${var.ami_version}-{{timestamp}}"
@@ -144,6 +152,9 @@ source "amazon-ebs" "golden" {
   subnet_id = var.subnet_id != "" ? var.subnet_id : null
   vpc_id    = var.vpc_id != "" ? var.vpc_id : null
 
+  # Restrict the build instance's network access — must be set for non-default VPC builds
+  security_group_id = var.security_group_id != "" ? var.security_group_id : null
+
   # IAM instance profile — needed for SSM, Inspector, CW
   iam_instance_profile = var.iam_instance_profile
 
@@ -169,6 +180,20 @@ source "amazon-ebs" "golden" {
 
   snapshot_tags = {
     Name      = "${var.ami_name_prefix}-${var.ami_version}-snapshot"
+    ManagedBy = "packer"
+  }
+
+  # Tags applied to the temporary build EC2 instance
+  run_tags = {
+    Name        = "packer-build-${var.ami_name_prefix}-${var.ami_version}"
+    ManagedBy   = "packer"
+    Environment = "build"
+    Purpose     = "golden-ami-build"
+  }
+
+  # Tags applied to the ephemeral EBS volume(s) attached to the build instance
+  run_volume_tags = {
+    Name      = "packer-build-volume-${var.ami_name_prefix}"
     ManagedBy = "packer"
   }
 
@@ -230,5 +255,12 @@ build {
       "JAVA_VERSION=${var.java_version}",
       "NODE_VERSION=${var.node_version}"
     ]
+  }
+
+  # Write the built AMI ID to a manifest for downstream pipeline stages —
+  # avoids scraping the build log for "ami-..." patterns.
+  post-processor "manifest" {
+    output     = "manifest.json"
+    strip_path = true
   }
 }

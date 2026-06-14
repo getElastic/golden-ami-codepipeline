@@ -29,7 +29,7 @@ Parameters:
 
   GitHubOwner:
     Type: String
-    Description: GitHub org or username (e.g. getElastic).
+    Description: GitHub org or username (e.g. my-org).
 
   GitHubRepo:
     Type: String
@@ -209,7 +209,8 @@ Resources:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "${ArtifactBucket.Arn}/*"
 
-              # EC2 - Packer needs these to launch/manage the build instance
+              # EC2 - read-only describe/list actions. These do not support
+              # resource-level permissions in IAM, so Resource must be "*".
               - Effect: Allow
                 Action:
                   - ec2:DescribeImages
@@ -224,26 +225,120 @@ Resources:
                   - ec2:DescribeVolumes
                   - ec2:DescribeSnapshots
                   - ec2:DescribeImageAttribute
+                Resource: "*"
+
+              # EC2 - launch build/scan instances. Scoped to this
+              # account/region; requires the instance/volume to be tagged
+              # ManagedBy=packer (Packer build instance, via run_tags/
+              # run_volume_tags in golden-ami.pkr.hcl) or ManagedBy=codepipeline
+              # (Inspector gate's temp scan instance, buildspec-inspector.yml).
+              - Effect: Allow
+                Action:
                   - ec2:RunInstances
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:volume/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:network-interface/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:subnet/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:security-group/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:key-pair/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:image/*"
+                  - "arn:aws:ec2:*::image/*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/ManagedBy":
+                      - "packer"
+                      - "codepipeline"
+
+              # EC2 - stop/terminate build/scan instances once done.
+              # Restricted to instances tagged ManagedBy=packer (Packer build
+              # instance) or ManagedBy=codepipeline (Inspector gate's temp
+              # scan instance).
+              - Effect: Allow
+                Action:
                   - ec2:StopInstances
                   - ec2:TerminateInstances
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/ManagedBy":
+                      - "packer"
+                      - "codepipeline"
+
+              # EC2 - create the AMI/snapshot from the build instance. Requires
+              # the new AMI/snapshot to be tagged ManagedBy=packer (set via
+              # tags/snapshot_tags in golden-ami.pkr.hcl).
+              - Effect: Allow
+                Action:
                   - ec2:CreateImage
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:image/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:snapshot/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:volume/*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/ManagedBy": "packer"
+
+              # EC2 - manage AMIs/snapshots already tagged ManagedBy=packer
+              # (sharing, deprecation, cleanup of the previous build's images).
+              - Effect: Allow
+                Action:
+                  - ec2:ModifyImageAttribute
+                  - ec2:ModifySnapshotAttribute
+                  - ec2:EnableImageDeprecation
+                  - ec2:DeregisterImage
+                  - ec2:DeleteSnapshot
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:image/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:snapshot/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/ManagedBy": "packer"
+
+              # EC2 - tag/untag resources Packer created (AMI, snapshot, build
+              # instance, build volume); all carry ManagedBy=packer.
+              - Effect: Allow
+                Action:
                   - ec2:CreateTags
                   - ec2:DeleteTags
-                  - ec2:DeleteSnapshot
-                  - ec2:CreateKeyPair
-                  - ec2:DeleteKeyPair
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:image/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:snapshot/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:volume/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/ManagedBy": "packer"
+
+              # EC2 - ephemeral key pair / security group that Packer creates
+              # and tears down for each build. Account/region scoped; Packer
+              # does not tag these at creation so no ManagedBy condition.
+              - Effect: Allow
+                Action:
                   - ec2:CreateSecurityGroup
                   - ec2:DeleteSecurityGroup
                   - ec2:AuthorizeSecurityGroupIngress
                   - ec2:RevokeSecurityGroupIngress
-                  - ec2:ModifyImageAttribute
-                  - ec2:ModifySnapshotAttribute
-                  - ec2:EnableImageDeprecation
+                  - ec2:CreateKeyPair
+                  - ec2:DeleteKeyPair
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:security-group/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:key-pair/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:vpc/*"
+
+              # EC2 - register/copy images during sharing/promotion. Source
+              # AMIs may be owned by this account or Amazon, so image/* is not
+              # tag-scoped here.
+              - Effect: Allow
+                Action:
                   - ec2:CopyImage
                   - ec2:RegisterImage
-                  - ec2:DeregisterImage
-                Resource: "*"
+                Resource:
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:image/*"
+                  - !Sub "arn:aws:ec2:${AwsRegion}:${AWS::AccountId}:snapshot/*"
+                  - "arn:aws:ec2:*::image/*"
 
               # PassRole - only pass the Packer instance role
               - Effect: Allow

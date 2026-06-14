@@ -96,6 +96,14 @@ git push origin master
 
 The pipeline will appear in **CodePipeline → Pipelines** in the console.
 
+> **First run after deploying/updating the stack:** the CodeBuild role's EC2
+> permissions are scoped down with `aws:RequestTag`/`aws:ResourceTag`
+> conditions on `ManagedBy=packer` (see "IAM scoping" below). Watch the
+> `BuildAMI` stage logs on the first run — if Packer hits `AccessDenied` on
+> any EC2 call, it means a resource type isn't being tagged the way the
+> condition expects, and the policy in `cfn/pipeline.cfn.yml` needs adjusting
+> before this is safe to rely on for production builds.
+
 ---
 
 ## Pipeline stages
@@ -161,6 +169,34 @@ Set `TargetAccountIds` to a comma-separated list of workload account IDs. The pr
 2. Share the underlying EBS snapshot with each account
 
 Target accounts can then launch instances using the AMI ID or set up their own AMI copy.
+
+---
+
+## IAM scoping for the CodeBuild role
+
+The `CodeBuildRole` EC2 permissions are split across several statements
+instead of one `Resource: "*"` block:
+
+- Read-only `Describe*` actions remain `Resource: "*"` (EC2 doesn't support
+  resource-level permissions for these).
+- `RunInstances` is scoped to this account/region and requires
+  `aws:RequestTag/ManagedBy = packer`, satisfied by the `run_tags` /
+  `run_volume_tags` set on the `amazon-ebs` source in `golden-ami.pkr.hcl`.
+- Instance/AMI/snapshot lifecycle actions (`StopInstances`,
+  `TerminateInstances`, `ModifyImageAttribute`, `DeregisterImage`,
+  `DeleteSnapshot`, `CreateTags`/`DeleteTags`, etc.) are scoped to this
+  account/region and require `aws:ResourceTag/ManagedBy = packer`, satisfied
+  by the `tags` / `snapshot_tags` on the AMI and snapshot.
+- `CreateImage` requires `aws:RequestTag/ManagedBy = packer` for the same
+  reason.
+- Ephemeral security group / key pair create-delete actions and
+  `CopyImage`/`RegisterImage` are account/region-scoped without a tag
+  condition, since Packer doesn't tag those at creation time.
+
+If you change the `tags`, `snapshot_tags`, `run_tags`, or `run_volume_tags`
+in `golden-ami.pkr.hcl` (e.g. remove `ManagedBy = "packer"`), update the
+matching `Condition` blocks in `cfn/pipeline.cfn.yml` or the build will start
+failing with `AccessDenied`.
 
 ---
 

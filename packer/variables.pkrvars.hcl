@@ -22,8 +22,10 @@ share_account_ids = []
 subnet_id = ""
 vpc_id    = ""
 
-# For CMK encryption, replace with your KMS key ARN
-# kms_key_id = "arn:aws:kms:ap-southeast-2:ACCOUNT_ID:key/KEY_ID"
-kms_key_id = ""
+# REQUIRED — must be a CMK ARN. A blank value silently falls back to the
+# AWS-managed key, which is not acceptable for compliance-scoped builds.
+# Replace ACCOUNT_ID/KEY_ID with the CMK provisioned for this account before
+# running a production build.
+kms_key_id = "arn:aws:kms:ap-southeast-2:ACCOUNT_ID:key/KEY_ID" # REQUIRED — must be a CMK
 
 iam_instance_profile = "golden-ami-packer-instance-profile"

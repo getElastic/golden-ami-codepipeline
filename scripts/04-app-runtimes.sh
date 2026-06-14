@@ -38,8 +38,19 @@ echo ">>> Java ${JAVA_VERSION}: installed at ${JAVA_HOME_PATH}"
 
 echo ">>> Node.js: installing v${NODE_VERSION} via NodeSource"
 
-# Add NodeSource repo for the specific major version
-curl -fsSL "https://rpm.nodesource.com/setup_${NODE_VERSION}.x" | bash -
+# Add the NodeSource repo directly (GPG-verified) instead of piping their
+# setup script to bash — avoids executing an unverified remote script.
+rpm --import https://rpm.nodesource.com/gpgkey/ns-operations-public.key
+
+cat > /etc/yum.repos.d/nodesource-nodejs.repo <<EOF
+[nodesource-nodejs]
+name=Node.js Packages for Amazon Linux - \$basearch
+baseurl=https://rpm.nodesource.com/pub_${NODE_VERSION}.x/nodistro/nodejs/\$basearch
+enabled=1
+gpgcheck=1
+gpgkey=https://rpm.nodesource.com/gpgkey/ns-operations-public.key
+module_hotfixes=1
+EOF
 
 dnf install -y nodejs
 
